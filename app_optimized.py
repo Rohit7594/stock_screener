@@ -27,6 +27,7 @@ CACHE_MAX_SIZE = 256              # Max cached items
 # Volume significance thresholds
 VOL_ELEVATED_THRESHOLD = 1.20     # 20% above average = elevated
 VOL_REDUCED_THRESHOLD = 0.80      # 20% below average = reduced
+VOL_AVERAGE_DAYS = 10             # Days to use for volume average calculation
 
 # Market hours (IST)
 MARKET_OPEN_HOUR = 9
@@ -269,27 +270,28 @@ def get_volume_stats(symbol: str):
         avg_turnover = None      # Average daily turnover (for consistent comparison)
         todays_turnover = None   # Today's turnover from Yahoo Finance
         weekly_turnover = []     # Store last 7 days of turnover data
-        hist_30 = None
         
         try:
-            hist_30 = tk.history(period="30d", interval="1d")
-            if "Volume" in hist_30.columns and not hist_30["Volume"].empty:
-                avg_vol = float(hist_30["Volume"].mean())
+            hist = tk.history(period=f"{VOL_AVERAGE_DAYS + 5}d", interval="1d")
+            if "Volume" in hist.columns and not hist.empty:
+                # Use last VOL_AVERAGE_DAYS for average calculation
+                vol_data = hist.tail(VOL_AVERAGE_DAYS) if len(hist) >= VOL_AVERAGE_DAYS else hist
+                avg_vol = float(vol_data["Volume"].mean())
                 
                 # Calculate average turnover (Close × Volume) for consistency
-                if "Close" in hist_30.columns:
-                    turnovers = hist_30["Close"] * hist_30["Volume"]
+                if "Close" in vol_data.columns:
+                    turnovers = vol_data["Close"] * vol_data["Volume"]
                     avg_turnover = float(turnovers.mean())
                 
                 # Extract last 7 days of turnover (Close × Volume)
-                if "Close" in hist_30.columns and len(hist_30) >= 1:
+                if "Close" in hist.columns and len(hist) >= 1:
                     # Get today's turnover from the most recent data point
-                    latest_row = hist_30.iloc[-1]
+                    latest_row = hist.iloc[-1]
                     todays_turnover = float(latest_row["Close"]) * float(latest_row["Volume"])
                     
                     # Get last 7 days for the weekly chart
-                    if len(hist_30) >= 7:
-                        last_7_days = hist_30.tail(7)
+                    if len(hist) >= 7:
+                        last_7_days = hist.tail(7)
                         for idx, row in last_7_days.iterrows():
                             date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, 'strftime') else str(idx)[:10]
                             turnover = float(row["Close"]) * float(row["Volume"])
@@ -1691,7 +1693,7 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
                             }
                         ),
                         html.Div(
-                            "vs 30-day average",
+                            f"vs {VOL_AVERAGE_DAYS}-day average",
                             style={"color": "#555", "fontSize": "0.7rem", "marginTop": "8px", "fontStyle": "italic"}
                         )
                     ], width=3, style={
