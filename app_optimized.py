@@ -1941,6 +1941,8 @@ app.layout = dbc.Container([
     dcc.Store(id="sort-direction", data="asc"),
     dcc.Store(id="selected-index", data=DEFAULT_INDEX),  # Track selected index
     dcc.Store(id="selected-sector", data=None),  # Track clicked sector for drill-down
+    dcc.Store(id="sector-sort-column", data=None),  # Track sector detail sort column
+    dcc.Store(id="sector-sort-direction", data="desc"),  # Track sector detail sort direction
     
     # Hidden placeholder for close button (always exists so callback doesn't fail)
     html.Button(id="close-sector-detail", n_clicks=0, style={"display": "none"}),
@@ -2156,6 +2158,46 @@ def handle_sort(n_clicks_list, current_column, current_direction):
 
     return column, new_direction
 
+# Callback 4b: Handle sector detail column sorting
+@app.callback(
+    [Output("sector-sort-column", "data"),
+     Output("sector-sort-direction", "data")],
+    Input({"type": "sector-sort-button", "column": ALL}, "n_clicks"),
+    [State("sector-sort-column", "data"),
+     State("sector-sort-direction", "data")],
+    prevent_initial_call=True
+)
+def handle_sector_sort(n_clicks_list, current_column, current_direction):
+    """Handle sorting for sector detail table columns."""
+    # Handle case when no buttons exist yet (empty list)
+    if not n_clicks_list or len(n_clicks_list) == 0:
+        return dash.no_update, dash.no_update
+    
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update, dash.no_update
+
+    # Check if any button was actually clicked (not just initialized)
+    if not any(n_clicks_list):
+        return dash.no_update, dash.no_update
+
+    # Extract which button triggered
+    triggered = ctx.triggered[0]["prop_id"].split(".")[0]
+    try:
+        triggered_id = json.loads(triggered)
+        column = triggered_id["column"]
+    except (json.JSONDecodeError, KeyError):
+        return dash.no_update, dash.no_update
+
+    # Toggle direction
+    if column == current_column:
+        new_direction = "desc" if current_direction == "asc" else "asc"
+    else:
+        new_direction = "desc"  # default to descending for new column
+
+    logger.info(f"Sector sort: {column} {new_direction}")
+    return column, new_direction
+
 # Callback 5: Handle sector card click
 @app.callback(
     Output("selected-sector", "data", allow_duplicate=True),
@@ -2204,14 +2246,17 @@ def handle_close_sector_detail(n_clicks):
     Output("sector-detail-container", "children"),
     [Input("selected-sector", "data"),
      Input("stocks-data-store", "data"),
-     Input("current-days", "data")],
+     Input("current-days", "data"),
+     Input("sector-sort-column", "data"),
+     Input("sector-sort-direction", "data")],
     prevent_initial_call=True
 )
-def update_sector_detail_panel(selected_sector, stocks_data_store, days):
+def update_sector_detail_panel(selected_sector, stocks_data_store, days, sort_column, sort_direction):
     """
     Update the sector detail panel inside the sector rotation card.
     This callback only updates the sector detail content, not the entire page.
     Uses existing data from stocks_data_store - no additional API calls.
+    Supports sortable columns for all indicators.
     """
     if not selected_sector or not stocks_data_store:
         return None  # Return empty - will collapse smoothly via CSS
@@ -2236,6 +2281,40 @@ def update_sector_detail_panel(selected_sector, stocks_data_store, days):
             f"No stocks found in {selected_sector}",
             style={"color": "#888", "padding": "20px", "textAlign": "center"}
         )
+    
+    # Sort sector stocks if sort column is specified
+    if sort_column:
+        # Column mapping (same as main table)
+        column_mapping = {
+            "SYMBOL": "SYMBOL",
+            "INDUSTRIES": "INDUSTRIES",
+            "LAST_CLOSE": "LAST_DAY_CLOSING_PRICE",
+            "OPEN": "TODAY_PRICE_OPEN",
+            "CURRENT": "TODAY_CURRENT_PRICE",
+            "1D_CHANGE": "TODAY_CURRENT_PRICE_CHANGE",
+            "1D_CHANGE_PCT": "TODAY_CURRENT_PRICE_CHANGE_PCT",
+            "ND_PRICE": "HISTORICAL_PRICE",
+            "ND_CHANGE": "HISTORICAL_CHANGE",
+            "ND_CHANGE_PCT": "HISTORICAL_CHANGE_PCT",
+            "52W_HIGH": "52WEEK_HIGH",
+            "52W_LOW": "52WEEK_LOW",
+            "MARKET_CAP": "MARKET_CAP_CR",
+            "PE": "PE",
+            "EPS": "EPS",
+            "AVG_VOLUME": "TODAY_VOLUME_AVERAGE",
+            "TODAY_VOLUME": "TODAY_VOLUME",
+            "VOL_CHANGE_PCT": "VOL_CHANGE_PCT",
+        }
+        
+        data_key = column_mapping.get(sort_column)
+        if data_key:
+            reverse = (sort_direction == "desc")
+            sector_stocks = sorted(
+                sector_stocks,
+                key=lambda x: (x.get(data_key) is None, x.get(data_key) if x.get(data_key) is not None else 0),
+                reverse=reverse
+            )
+            logger.info(f"Sorted sector by {sort_column} {sort_direction}")
     
     # Helper functions for formatting (same as generate_table)
     def format_value(val, decimals=2):
@@ -2329,32 +2408,64 @@ def update_sector_detail_panel(selected_sector, stocks_data_store, days):
             # TODAY VOLUME
             html.Td(format_value(stock.get("TODAY_VOLUME"), decimals=0), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#777", "minWidth": "90px"}),
             # VOL CHANGE %
-            html.Td(format_pct(stock.get("VOL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
+            html.Td(format_pct(stock.get("VOL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px 15px 8px 8px", "textAlign": "right", "minWidth": "110px"}),
         ], className="sector-stock-row"))
     
-    # Build header row with same columns as main table
-    sector_header_style = {"padding": "10px 8px", "textAlign": "center", "color": "#000", "fontWeight": "700", "whiteSpace": "nowrap"}
+    # Helper function to create sortable header
+    def create_sector_header(label, column_key, min_width="80px", align="center", extra_style=None):
+        is_sorted = (sort_column == column_key)
+        sort_indicator = " ▼" if is_sorted and sort_direction == "desc" else " ▲" if is_sorted else ""
+        
+        btn_style = {
+            "backgroundColor": "#9b59b6",
+            "color": "#fff",
+            "fontWeight": "700",
+            "padding": "8px 6px",
+            "textAlign": align,
+            "border": "none",
+            "cursor": "pointer",
+            "width": "100%",
+            "fontSize": "0.75rem",
+            "minWidth": min_width,
+            "whiteSpace": "nowrap",
+            "transition": "background 0.2s",
+        }
+        if extra_style:
+            btn_style.update(extra_style)
+        
+        return html.Th(
+            html.Button(
+                label + sort_indicator,
+                id={"type": "sector-sort-button", "column": column_key},
+                n_clicks=0,
+                style=btn_style,
+                className="sector-sort-btn"
+            ),
+            style={"backgroundColor": "#9b59b6", "padding": "0"}
+        )
+    
+    # Build header row with sortable columns
     sector_table = html.Table([
         html.Thead(html.Tr([
-            html.Th("S.No", style={**sector_header_style, "minWidth": "40px"}),
-            html.Th("SYMBOL", style={**sector_header_style, "minWidth": "80px"}),
-            html.Th("INDUSTRIES", style={**sector_header_style, "textAlign": "left", "minWidth": "120px"}),
-            html.Th("LAST CLOSE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th("OPEN", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th("CURRENT", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th("1D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
-            html.Th("1D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-            html.Th(f"{days}D PRICE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th(f"{days}D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
-            html.Th(f"{days}D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-            html.Th("52W HIGH", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th("52W LOW", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-            html.Th("MARKET CAP (Cr)", style={**sector_header_style, "textAlign": "right", "minWidth": "100px"}),
-            html.Th("P/E", style={**sector_header_style, "textAlign": "right", "minWidth": "60px"}),
-            html.Th("EPS", style={**sector_header_style, "textAlign": "right", "minWidth": "70px"}),
-            html.Th("AVG VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-            html.Th("TODAY VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-            html.Th("VOL CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+            html.Th("S.No", style={"padding": "10px 8px", "textAlign": "center", "color": "#fff", "fontWeight": "700", "minWidth": "40px", "backgroundColor": "#9b59b6"}),
+            create_sector_header("SYMBOL", "SYMBOL", "80px"),
+            create_sector_header("INDUSTRIES", "INDUSTRIES", "120px", "left"),
+            create_sector_header("LAST CLOSE", "LAST_CLOSE", "85px", "right"),
+            create_sector_header("OPEN", "OPEN", "85px", "right"),
+            create_sector_header("CURRENT", "CURRENT", "85px", "right"),
+            create_sector_header("1D CHG", "1D_CHANGE", "75px", "right"),
+            create_sector_header("1D CHG %", "1D_CHANGE_PCT", "85px", "right"),
+            create_sector_header(f"{days}D PRICE", "ND_PRICE", "85px", "right"),
+            create_sector_header(f"{days}D CHG", "ND_CHANGE", "75px", "right"),
+            create_sector_header(f"{days}D %", "ND_CHANGE_PCT", "80px", "right"),
+            create_sector_header("52W HIGH", "52W_HIGH", "85px", "right"),
+            create_sector_header("52W LOW", "52W_LOW", "85px", "right"),
+            create_sector_header("MCAP (Cr)", "MARKET_CAP", "95px", "right"),
+            create_sector_header("P/E", "PE", "55px", "right"),
+            create_sector_header("EPS", "EPS", "60px", "right"),
+            create_sector_header("AVG VOL", "AVG_VOLUME", "85px", "right"),
+            create_sector_header("TODAY VOL", "TODAY_VOLUME", "90px", "right"),
+            create_sector_header("VOL %", "VOL_CHANGE_PCT", "85px", "right", {"paddingRight": "12px"}),
         ], style={"background": "linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)"})),
         html.Tbody(sector_rows)
     ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.85rem"})
@@ -2402,7 +2513,12 @@ def update_sector_detail_panel(selected_sector, stocks_data_store, days):
         html.Div(
             sector_table, 
             className="sector-detail-table",
-            style={"maxHeight": "350px", "overflowY": "auto", "overflowX": "auto"}
+            style={
+                "maxHeight": "350px", 
+                "overflowY": "auto", 
+                "overflowX": "auto",
+                "padding": "0 15px 15px 0",  # Right and bottom padding for scroll visibility
+            }
         )
     ], className="slide-down-enter", style={
         "background": "linear-gradient(135deg, #15101e 0%, #1a1a2e 50%, #0f0f1a 100%)",

@@ -7,9 +7,9 @@
 /* Smooth expand/collapse animation for sector detail panel */
 .sector-detail-container {
     overflow: hidden;
-    transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), 
-                opacity 0.3s ease-in-out,
-                margin 0.3s ease-in-out;
+    transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+        opacity 0.3s ease-in-out,
+        margin 0.3s ease-in-out;
 }
 
 .sector-detail-container.collapsed {
@@ -42,9 +42,12 @@
 
 /* Pulse animation for alerts */
 @keyframes pulse {
-    0%, 100% {
+
+    0%,
+    100% {
         box-shadow: 0 0 15px rgba(255, 77, 77, 0.4);
     }
+
     50% {
         box-shadow: 0 0 30px rgba(255, 77, 77, 0.7);
     }
@@ -56,9 +59,12 @@
 
 /* Glow animation for big numbers */
 @keyframes glow {
-    0%, 100% {
+
+    0%,
+    100% {
         text-shadow: 0 0 30px rgba(0, 212, 255, 0.4);
     }
+
     50% {
         text-shadow: 0 0 50px rgba(0, 212, 255, 0.7);
     }
@@ -75,6 +81,7 @@
         opacity: 0;
         transform: translateY(-10px);
     }
+
     to {
         max-height: 600px;
         opacity: 1;
@@ -92,6 +99,7 @@
         opacity: 0;
         transform: translateX(-10px);
     }
+
     to {
         opacity: 1;
         transform: translateX(0);
@@ -103,16 +111,45 @@
 }
 
 /* Stagger animation delay for rows */
-.sector-stock-row:nth-child(1) { animation-delay: 0.05s; }
-.sector-stock-row:nth-child(2) { animation-delay: 0.1s; }
-.sector-stock-row:nth-child(3) { animation-delay: 0.15s; }
-.sector-stock-row:nth-child(4) { animation-delay: 0.2s; }
-.sector-stock-row:nth-child(5) { animation-delay: 0.25s; }
-.sector-stock-row:nth-child(6) { animation-delay: 0.3s; }
-.sector-stock-row:nth-child(7) { animation-delay: 0.35s; }
-.sector-stock-row:nth-child(8) { animation-delay: 0.4s; }
-.sector-stock-row:nth-child(9) { animation-delay: 0.45s; }
-.sector-stock-row:nth-child(10) { animation-delay: 0.5s; }
+.sector-stock-row:nth-child(1) {
+    animation-delay: 0.05s;
+}
+
+.sector-stock-row:nth-child(2) {
+    animation-delay: 0.1s;
+}
+
+.sector-stock-row:nth-child(3) {
+    animation-delay: 0.15s;
+}
+
+.sector-stock-row:nth-child(4) {
+    animation-delay: 0.2s;
+}
+
+.sector-stock-row:nth-child(5) {
+    animation-delay: 0.25s;
+}
+
+.sector-stock-row:nth-child(6) {
+    animation-delay: 0.3s;
+}
+
+.sector-stock-row:nth-child(7) {
+    animation-delay: 0.35s;
+}
+
+.sector-stock-row:nth-child(8) {
+    animation-delay: 0.4s;
+}
+
+.sector-stock-row:nth-child(9) {
+    animation-delay: 0.45s;
+}
+
+.sector-stock-row:nth-child(10) {
+    animation-delay: 0.5s;
+}
 
 /* Gainer/Loser row highlighting */
 .gainer-row {
@@ -153,10 +190,21 @@
     background: rgba(255, 77, 77, 0.3) !important;
 }
 
+/* Sector sort button hover effect */
+.sector-sort-btn:hover {
+    background: #8e44ad !important;
+    filter: brightness(1.2);
+}
+
 /* Loading spinner for sector detail */
 @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 
 .loading-spinner {
