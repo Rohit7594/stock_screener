@@ -211,16 +211,26 @@ def get_index_constituents(index_name: str) -> list:
     return []
 
 
-def get_symbol_industry(symbol: str) -> str:
-    """Get industry for a single symbol from NSE API. Uses cache."""
+def get_symbol_industry(symbol: str) -> dict:
+    """Get industry hierarchy for a single symbol from NSE API. Uses cache.
+    
+    Returns dict with:
+        - macro: NSE macro sector (e.g., "Financial Services", "Energy")
+        - sector: NSE sector (e.g., "Banks", "Oil Gas & Consumable Fuels")
+        - industry: NSE industry (e.g., "Private Sector Bank")
+    """
     try:
         data = get_nse_data(symbol)
         if data:
             industry_info = data.get("industryInfo", {})
-            return industry_info.get("industry") or industry_info.get("sector") or "N/A"
+            return {
+                "macro": industry_info.get("macro") or "Others",
+                "sector": industry_info.get("sector") or "N/A",
+                "industry": industry_info.get("industry") or industry_info.get("sector") or "N/A",
+            }
     except Exception as e:
         logger.warning(f"Could not get industry for {symbol}: {e}")
-    return "N/A"
+    return {"macro": "Others", "sector": "N/A", "industry": "N/A"}
 
 
 def load_index_with_industries(index_name: str) -> dict:
@@ -426,6 +436,7 @@ def get_fundamentals(symbol: str):
             "EPS": round(eps, 2) if eps is not None else None,
             "Market Cap": round(mcap, 2) if mcap is not None else None,
             "Sector": sector or "N/A",
+            "Macro": industry.get("macro") or "Others",  # For sector rotation tracker
             "52W High": week.get("max"),
             "52W Low": week.get("min"),
             "priceInfo": price_info,
@@ -459,9 +470,10 @@ def get_historical_comparison(symbol: str, days: int):
         # Get current price (most recent) - index -1 is today
         current_price = float(hist['Close'].iloc[-1])
         
-        # Get price from N days ago
-        # -1 is today, -2 is yesterday, so -(days+1) is N days ago
-        target_index = -(days + 1)
+        # Get price from N trading days ago
+        # -1 is today, -2 is yesterday, so -days is N days ago
+        # (Previously used -(days+1) which was off-by-one)
+        target_index = -days
         if len(hist) >= abs(target_index):
             old_price = float(hist['Close'].iloc[target_index])
         else:
@@ -1127,7 +1139,286 @@ def create_index_candlestick_chart(index_name: str):
 
 
 # -------------------------------------------------------------------
-# 9) FETCH DATA FOR SYMBOLS IN SELECTED INDUSTRY
+# 9) SECTOR ROTATION TRACKER (MCAP-Weighted)
+# -------------------------------------------------------------------
+
+# Emoji mapping for major NSE macro sectors
+SECTOR_EMOJIS = {
+    "Financial Services": "🏦",
+    "Information Technology": "💻",
+    "Fast Moving Consumer Goods": "🛒",
+    "Energy": "⚡",
+    "Healthcare": "💊",
+    "Automobile and Auto Components": "🚗",
+    "Consumer Services": "🎯",
+    "Capital Goods": "🏭",
+    "Metals & Mining": "⛏️",
+    "Construction Materials": "🏗️",
+    "Telecommunication": "📡",
+    "Services": "🔧",
+    "Chemicals": "🧪",
+    "Consumer Durables": "📺",
+    "Oil Gas & Consumable Fuels": "🛢️",
+    "Diversified": "🎲",
+    "Realty": "🏠",
+    "Media Entertainment & Publication": "🎬",
+    "Textiles": "👔",
+    "Power": "⚡",
+    "Others": "📦",
+}
+
+
+def calculate_sector_indices(stocks_data: list) -> list:
+    """
+    Calculate MCAP-weighted index change for each major sector.
+    
+    Uses ONLY existing data from stocks_data - NO additional API calls.
+    
+    Formula (NSE Standard):
+    Sector Change % = Σ(Stock MCAP × Stock %Change) / Σ(Stock MCAP)
+    
+    Returns: List of sector dicts sorted by 1-day performance
+    """
+    if not stocks_data:
+        return []
+    
+    # Group stocks by macro sector
+    sectors = {}
+    for stock in stocks_data:
+        macro = stock.get("MACRO_SECTOR", "Others")
+        if not macro or macro == "N/A":
+            macro = "Others"
+            
+        if macro not in sectors:
+            sectors[macro] = {
+                "stocks": [],
+                "total_mcap": 0,
+                "weighted_change": 0,
+                "total_turnover": 0,
+                "stocks_up": 0,
+                "stocks_down": 0,
+            }
+        
+        mcap = safe_float(stock.get("MARKET_CAP_CR"))
+        change_pct = safe_float(stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT"))
+        turnover = safe_float(stock.get("TODAYS_TURNOVER"))
+        
+        if mcap and mcap > 0:
+            sectors[macro]["total_mcap"] += mcap
+            if change_pct is not None:
+                sectors[macro]["weighted_change"] += mcap * change_pct
+                if change_pct > 0:
+                    sectors[macro]["stocks_up"] += 1
+                elif change_pct < 0:
+                    sectors[macro]["stocks_down"] += 1
+            sectors[macro]["stocks"].append(stock)
+        
+        if turnover:
+            sectors[macro]["total_turnover"] += turnover
+    
+    # Calculate sector index changes
+    result = []
+    for sector_name, data in sectors.items():
+        if len(data["stocks"]) < 2:  # Skip sectors with < 2 stocks
+            continue
+        
+        if data["total_mcap"] > 0:
+            sector_change_pct = data["weighted_change"] / data["total_mcap"]
+        else:
+            sector_change_pct = 0
+        
+        # Find top gainers and losers
+        sorted_stocks = sorted(
+            data["stocks"],
+            key=lambda x: safe_float(x.get("TODAY_CURRENT_PRICE_CHANGE_PCT")) or 0,
+            reverse=True
+        )
+        top_gainers = [s["SYMBOL"] for s in sorted_stocks[:2] if safe_float(s.get("TODAY_CURRENT_PRICE_CHANGE_PCT", 0)) > 0]
+        top_losers = [s["SYMBOL"] for s in sorted_stocks[-2:] if safe_float(s.get("TODAY_CURRENT_PRICE_CHANGE_PCT", 0)) < 0]
+        
+        result.append({
+            "sector": sector_name,
+            "emoji": SECTOR_EMOJIS.get(sector_name, "📊"),
+            "1d_change": round(sector_change_pct, 2),
+            "total_turnover": data["total_turnover"],
+            "stock_count": len(data["stocks"]),
+            "total_mcap": data["total_mcap"],
+            "stocks_up": data["stocks_up"],
+            "stocks_down": data["stocks_down"],
+            "top_gainers": top_gainers,
+            "top_losers": top_losers,
+        })
+    
+    # Sort by 1-day change (best performing first)
+    result.sort(key=lambda x: x["1d_change"], reverse=True)
+    return result
+
+
+def create_sector_rotation_panel(sector_indices: list):
+    """
+    Create a visual panel showing sector rotation with MCAP-weighted changes.
+    Uses existing glassmorphism styling for consistency.
+    
+    Returns: dbc.Card component or None if no data
+    """
+    if not sector_indices:
+        return None
+    
+    sector_cards = []
+    for i, sector in enumerate(sector_indices):
+        change = sector["1d_change"]
+        is_positive = change >= 0
+        is_top = i == 0  # Best performing sector
+        is_bottom = i == len(sector_indices) - 1  # Worst performing sector
+        
+        # Gradient based on performance intensity
+        if change >= 1.5:
+            bg_gradient = "linear-gradient(135deg, rgba(0,255,136,0.2) 0%, rgba(0,153,68,0.15) 100%)"
+            border_color = "#00ff88"
+        elif change >= 0.5:
+            bg_gradient = "linear-gradient(135deg, rgba(0,204,102,0.15) 0%, rgba(0,102,51,0.1) 100%)"
+            border_color = "#00cc66"
+        elif change >= 0:
+            bg_gradient = "linear-gradient(135deg, rgba(136,204,136,0.1) 0%, rgba(68,136,68,0.08) 100%)"
+            border_color = "#88cc88"
+        elif change >= -0.5:
+            bg_gradient = "linear-gradient(135deg, rgba(204,136,136,0.1) 0%, rgba(136,68,68,0.08) 100%)"
+            border_color = "#cc8888"
+        elif change >= -1.5:
+            bg_gradient = "linear-gradient(135deg, rgba(255,77,77,0.15) 0%, rgba(153,0,0,0.1) 100%)"
+            border_color = "#ff4d4d"
+        else:
+            bg_gradient = "linear-gradient(135deg, rgba(255,51,51,0.2) 0%, rgba(170,0,0,0.15) 100%)"
+            border_color = "#ff3333"
+        
+        # Top/bottom performer badges
+        badge = None
+        if is_top:
+            badge = html.Span("🔥", style={"position": "absolute", "top": "-8px", "right": "-8px", "fontSize": "1rem"})
+        elif is_bottom:
+            badge = html.Span("❄️", style={"position": "absolute", "top": "-8px", "right": "-8px", "fontSize": "1rem"})
+        
+        # Turnover display in Crores
+        turnover_cr = sector["total_turnover"] / CRORE_DIVISOR if sector["total_turnover"] else 0
+        if turnover_cr >= 1000:
+            turnover_display = f"₹{turnover_cr/1000:.1f}K Cr"
+        else:
+            turnover_display = f"₹{turnover_cr:.0f} Cr"
+        
+        # Breadth indicator (up vs down)
+        breadth_ratio = sector["stocks_up"] / sector["stock_count"] * 100 if sector["stock_count"] > 0 else 50
+        
+        card = html.Div([
+            badge,
+            # Sector icon and name
+            html.Div([
+                html.Span(sector["emoji"], style={"fontSize": "2.2rem"}),
+            ], style={"textAlign": "center", "marginBottom": "10px"}),
+            
+            html.Div(sector["sector"], style={
+                "fontSize": "0.85rem", 
+                "color": "#ddd", 
+                "textAlign": "center",
+                "height": "40px",
+                "overflow": "hidden", 
+                "textOverflow": "ellipsis",
+                "lineHeight": "1.3",
+                "fontWeight": "600",
+            }),
+            
+            # Change percentage (prominent)
+            html.Div([
+                html.Span("▲ " if is_positive else "▼ ", style={"fontSize": "1.1rem"}),
+                html.Span(f"{change:+.2f}%", style={
+                    "fontSize": "1.5rem", 
+                    "fontWeight": "700",
+                    "color": "#00ff88" if change >= 1 else "#00cc66" if is_positive else "#ff4d4d" if change <= -1 else "#cc8888"
+                })
+            ], style={"textAlign": "center", "marginBottom": "12px"}),
+            
+            # Stock count and breadth
+            html.Div([
+                html.Span(f"{sector['stock_count']} ", style={"fontWeight": "600", "color": "#aaa"}),
+                html.Span("stocks", style={"color": "#888"})
+            ], style={"fontSize": "0.8rem", "textAlign": "center", "marginBottom": "8px"}),
+            
+            # Breadth bar
+            html.Div([
+                html.Div(style={
+                    "width": f"{breadth_ratio}%",
+                    "height": "5px",
+                    "background": "linear-gradient(90deg, #00cc66, #00ff88)",
+                    "borderRadius": "3px",
+                }),
+            ], style={
+                "width": "100%",
+                "height": "5px",
+                "background": "#333",
+                "borderRadius": "3px",
+                "marginTop": "8px",
+            }),
+            
+            # Turnover
+            html.Div(turnover_display, style={
+                "fontSize": "0.75rem", 
+                "color": "#777", 
+                "textAlign": "center",
+                "marginTop": "10px",
+                "fontWeight": "500",
+            })
+        ], style={
+            "background": bg_gradient,
+            "border": f"1px solid {border_color}60",
+            "borderRadius": "14px",
+            "padding": "18px 14px",
+            "minWidth": "145px",
+            "maxWidth": "165px",
+            "flex": "0 0 auto",
+            "position": "relative",
+            "transition": "transform 0.2s, box-shadow 0.2s",
+        })
+        sector_cards.append(card)
+    
+    return dbc.Card([
+        dbc.CardHeader([
+            html.Div([
+                html.Div([
+                    html.Span("MCAP-Weighted", style={
+                        "fontSize": "0.7rem", 
+                        "color": "#9b59b6", 
+                        "fontWeight": "600",
+                        "padding": "4px 10px",
+                        "background": "rgba(155, 89, 182, 0.15)",
+                        "borderRadius": "12px",
+                        "border": "1px solid rgba(155, 89, 182, 0.3)",
+                    })
+                ])
+            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"})
+        ], style={
+            "background": "linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
+            "borderBottom": "2px solid #9b59b6",
+            "padding": "14px 20px"
+        }),
+        dbc.CardBody([
+            html.Div(sector_cards, style={
+                "display": "flex",
+                "gap": "12px",
+                "overflowX": "auto",
+                "padding": "8px 4px",
+                "scrollbarWidth": "thin",
+            })
+        ], style={"padding": "16px"})
+    ], style={
+        "background": "linear-gradient(135deg, #12121c 0%, #1a1a2e 50%, #0f0f1a 100%)",
+        "border": "1px solid #333",
+        "borderRadius": "15px",
+        "boxShadow": "0 8px 32px rgba(155, 89, 182, 0.12), inset 0 1px 0 rgba(255,255,255,0.05)",
+        "backdropFilter": "blur(10px)",
+    })
+
+
+# -------------------------------------------------------------------
+# 10) FETCH DATA FOR SYMBOLS IN SELECTED INDUSTRY
 # -------------------------------------------------------------------
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1167,6 +1458,7 @@ def fetch_stocks_data_for_industry(symbols, days_comparison=10, batch_size: int 
                 "SYMBOL": symbol,
                 "STOCK_NAME": symbol,
                 "INDUSTRIES": fund.get('Sector', 'N/A'),
+                "MACRO_SECTOR": fund.get('Macro', 'Others'),  # For sector rotation tracker
                 "LAST_DAY_CLOSING_PRICE": prev_close,
                 "TODAY_PRICE_OPEN": today_open,
                 "TODAY_CURRENT_PRICE": last_price,
@@ -1678,8 +1970,17 @@ def load_index_data(selected_index):
         logger.warning(f"WARNING: No data loaded for {selected_index}!")
         return {}, [], None, selected_index, selected_index
     
-    industries = set(symbol_industry_map.values())
-    industries.discard("N/A")
+    # Extract industries for dropdown (handle both dict and string formats)
+    industries = set()
+    for val in symbol_industry_map.values():
+        if isinstance(val, dict):
+            # New format: get 'industry' field from dict
+            ind = val.get('industry', 'N/A')
+        else:
+            # Legacy format: string
+            ind = val
+        if ind and ind != 'N/A':
+            industries.add(ind)
     
     # Add "All" option at the beginning
     options = [{"label": "🌐 All Industries", "value": "ALL"}]
@@ -1755,8 +2056,17 @@ def fetch_industry_data(selected_industry, manual_clicks, auto_intervals, days_i
         symbols_in_industry = list(symbol_industry_map.keys())
         display_name = "All Industries"
     else:
-        symbols_in_industry = [symbol for symbol, industry in symbol_industry_map.items() 
-                              if industry == selected_industry]
+        # Handle both dict and string format for industry mapping
+        symbols_in_industry = []
+        for symbol, industry_data in symbol_industry_map.items():
+            if isinstance(industry_data, dict):
+                # New format: compare with 'industry' field
+                if industry_data.get('industry') == selected_industry:
+                    symbols_in_industry.append(symbol)
+            else:
+                # Legacy format: string comparison
+                if industry_data == selected_industry:
+                    symbols_in_industry.append(symbol)
         display_name = selected_industry
     
     if not symbols_in_industry:
@@ -2147,6 +2457,11 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
     index_candlestick_chart = create_index_candlestick_chart(selected_index or DEFAULT_INDEX)
     print(f"DEBUG index_candlestick_chart: index={selected_index}, chart_type={type(index_candlestick_chart).__name__}, truthy={bool(index_candlestick_chart)}")
     
+    # ========== SECTOR ROTATION TRACKER ==========
+    sector_indices = calculate_sector_indices(stocks_data)
+    sector_rotation_panel = create_sector_rotation_panel(sector_indices)
+    print(f"DEBUG sector_rotation: {len(sector_indices)} sectors found")
+    
     # Build candlestick chart card
     # Note: dcc.Graph objects don't evaluate to True in boolean context, so check explicitly
     if index_candlestick_chart is not None:
@@ -2449,6 +2764,16 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
             )
         )
     
+    # Accordion item for SECTOR ROTATION TRACKER
+    if sector_rotation_panel is not None:
+        accordion_items.append(
+            dbc.AccordionItem(
+                sector_rotation_panel,
+                title="🔄 SECTOR ROTATION",
+                item_id="sector-accordion",
+            )
+        )
+    
     # Accordion item for AGGREGATE VOLUME INDICATOR
     accordion_items.append(
         dbc.AccordionItem(
@@ -2458,10 +2783,10 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
         )
     )
     
-    # Create accordion with both sections open by default
+    # Create accordion with all sections open by default
     indicators_accordion = dbc.Accordion(
         accordion_items,
-        active_item=["candlestick-accordion", "volume-accordion"],  # Both open by default
+        active_item=["candlestick-accordion", "sector-accordion", "volume-accordion"],  # All open by default
         always_open=True,  # Allow multiple sections open at once
         flush=True,
         style={
