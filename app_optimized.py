@@ -1308,7 +1308,7 @@ def create_sector_rotation_panel(sector_indices: list):
         # Breadth indicator (up vs down)
         breadth_ratio = sector["stocks_up"] / sector["stock_count"] * 100 if sector["stock_count"] > 0 else 50
         
-        card = html.Div([
+        card_content = html.Div([
             badge,
             # Sector icon and name
             html.Div([
@@ -1365,6 +1365,15 @@ def create_sector_rotation_panel(sector_indices: list):
                 "textAlign": "center",
                 "marginTop": "10px",
                 "fontWeight": "500",
+            }),
+            
+            # Click hint
+            html.Div("Click for details", style={
+                "fontSize": "0.6rem",
+                "color": "#555",
+                "textAlign": "center",
+                "marginTop": "8px",
+                "fontStyle": "italic",
             })
         ], style={
             "background": bg_gradient,
@@ -1373,10 +1382,23 @@ def create_sector_rotation_panel(sector_indices: list):
             "padding": "18px 14px",
             "minWidth": "145px",
             "maxWidth": "165px",
-            "flex": "0 0 auto",
             "position": "relative",
-            "transition": "transform 0.2s, box-shadow 0.2s",
         })
+        
+        # Wrap in clickable button
+        card = html.Button(
+            card_content,
+            id={"type": "sector-card", "sector": sector["sector"]},
+            style={
+                "background": "transparent",
+                "border": "none",
+                "padding": "0",
+                "cursor": "pointer",
+                "transition": "transform 0.2s, box-shadow 0.2s",
+                "flex": "0 0 auto",
+            },
+            className="sector-card-btn"
+        )
         sector_cards.append(card)
     
     return dbc.Card([
@@ -1764,6 +1786,16 @@ app.index_string = '''
             .accordion-collapse {
                 transition: all 0.3s ease !important;
             }
+            
+            /* Sector card button hover effect */
+            .sector-card-btn:hover {
+                transform: translateY(-3px) scale(1.02);
+                box-shadow: 0 8px 25px rgba(155, 89, 182, 0.3);
+            }
+            
+            .sector-card-btn:active {
+                transform: translateY(0) scale(0.98);
+            }
         </style>
     </head>
     <body>
@@ -1901,6 +1933,10 @@ app.layout = dbc.Container([
     dcc.Store(id="sort-column", data=None),
     dcc.Store(id="sort-direction", data="asc"),
     dcc.Store(id="selected-index", data=DEFAULT_INDEX),  # Track selected index
+    dcc.Store(id="selected-sector", data=None),  # Track clicked sector for drill-down
+    
+    # Hidden placeholder for close button (always exists so callback doesn't fail)
+    html.Button(id="close-sector-detail", n_clicks=0, style={"display": "none"}),
     
     dbc.Row([
         dbc.Col([
@@ -2113,7 +2149,50 @@ def handle_sort(n_clicks_list, current_column, current_direction):
 
     return column, new_direction
 
-# Callback 5: Generate table with sorting
+# Callback 5: Handle sector card click
+@app.callback(
+    Output("selected-sector", "data", allow_duplicate=True),
+    Input({"type": "sector-card", "sector": ALL}, "n_clicks"),
+    State("selected-sector", "data"),
+    prevent_initial_call=True
+)
+def handle_sector_click(n_clicks_list, current_sector):
+    """Toggle sector selection when a card is clicked."""
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return current_sector
+    
+    # Check if any button was actually clicked (not just initialized)
+    if not any(n_clicks_list):
+        return current_sector
+    
+    # Extract which sector was clicked
+    triggered = ctx.triggered[0]["prop_id"].split(".")[0]
+    triggered_id = json.loads(triggered)
+    clicked_sector = triggered_id["sector"]
+    
+    # Toggle: if same sector clicked again, close it
+    if clicked_sector == current_sector:
+        logger.info(f"Sector panel closed: {clicked_sector}")
+        return None
+    
+    logger.info(f"Sector selected: {clicked_sector}")
+    return clicked_sector
+
+# Callback 5b: Handle close button click
+@app.callback(
+    Output("selected-sector", "data", allow_duplicate=True),
+    Input("close-sector-detail", "n_clicks"),
+    prevent_initial_call=True
+)
+def handle_close_sector_detail(n_clicks):
+    """Close sector detail panel when close button is clicked."""
+    if n_clicks:
+        logger.info("Sector panel closed via close button")
+        return None
+    return dash.no_update
+
+# Callback 6: Generate table with sorting
 @app.callback(
     Output("table-container", "children"),
     [Input("stocks-data-store", "data"),
@@ -2121,10 +2200,11 @@ def handle_sort(n_clicks_list, current_column, current_direction):
      Input("current-days", "data"),
      Input("sort-column", "data"),
      Input("sort-direction", "data"),
-     Input("selected-index", "data")]  # Added for candlestick chart
+     Input("selected-index", "data"),
+     Input("selected-sector", "data")]  # NEW: For sector drill-down
 )
-def generate_table(stocks_data_store, selected_industry, days, sort_column, sort_direction, selected_index):
-    """Generate table with stock data, candlestick chart, and sorting."""
+def generate_table(stocks_data_store, selected_industry, days, sort_column, sort_direction, selected_index, selected_sector):
+    """Generate table with stock data, candlestick chart, sector drill-down, and sorting."""
 
     if not selected_industry:
         return html.Div([
@@ -2461,6 +2541,95 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
     sector_indices = calculate_sector_indices(stocks_data)
     sector_rotation_panel = create_sector_rotation_panel(sector_indices)
     print(f"DEBUG sector_rotation: {len(sector_indices)} sectors found")
+    
+    # ========== SECTOR DETAIL PANEL (when a sector card is clicked) ==========
+    sector_detail_panel = None
+    if selected_sector:
+        # Filter stocks by MACRO_SECTOR - using existing data, no API calls!
+        sector_stocks = [s for s in stocks_data if s.get("MACRO_SECTOR") == selected_sector]
+        logger.info(f"Sector detail: {selected_sector} has {len(sector_stocks)} stocks")
+        
+        if sector_stocks:
+            # Build mini table with key indicators
+            sector_rows = []
+            for i, stock in enumerate(sector_stocks):
+                row_bg = "#1a1a1a" if i % 2 == 0 else "#222222"
+                price_change_pct = stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT")
+                vol_change_pct = stock.get("VOL_CHANGE_PCT")
+                
+                sector_rows.append(html.Tr([
+                    html.Td(i + 1, style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "center", "color": "#777", "width": "40px"}),
+                    html.Td(stock["SYMBOL"], style={"backgroundColor": row_bg, "padding": "8px", "fontWeight": "700", "color": "#00D4FF"}),
+                    html.Td(f"₹{stock.get('TODAY_CURRENT_PRICE', 0):,.2f}" if stock.get('TODAY_CURRENT_PRICE') else "-", 
+                           style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontWeight": "600"}),
+                    html.Td(
+                        html.Span(f"{'▲' if price_change_pct >= 0 else '▼'} {price_change_pct:+.2f}%" if price_change_pct is not None else "-",
+                                 style={"color": "#00cc66" if price_change_pct and price_change_pct >= 0 else "#ff4d4d", "fontWeight": "700"}),
+                        style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right"}
+                    ),
+                    html.Td(f"₹{stock.get('MARKET_CAP_CR', 0)/1e7:,.0f} Cr" if stock.get('MARKET_CAP_CR') else "-",
+                           style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888"}),
+                    html.Td(
+                        html.Span(f"{'▲' if vol_change_pct >= 0 else '▼'} {vol_change_pct:+.1f}%" if vol_change_pct is not None else "-",
+                                 style={"color": "#00cc66" if vol_change_pct and vol_change_pct >= 0 else "#ff4d4d", "fontWeight": "600"}),
+                        style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right"}
+                    ),
+                ]))
+            
+            sector_table = html.Table([
+                html.Thead(html.Tr([
+                    html.Th("#", style={"padding": "10px 8px", "textAlign": "center", "color": "#000", "fontWeight": "700", "width": "40px"}),
+                    html.Th("SYMBOL", style={"padding": "10px 8px", "textAlign": "left", "color": "#000", "fontWeight": "700"}),
+                    html.Th("CURRENT PRICE", style={"padding": "10px 8px", "textAlign": "right", "color": "#000", "fontWeight": "700"}),
+                    html.Th("1D CHANGE", style={"padding": "10px 8px", "textAlign": "right", "color": "#000", "fontWeight": "700"}),
+                    html.Th("MARKET CAP", style={"padding": "10px 8px", "textAlign": "right", "color": "#000", "fontWeight": "700"}),
+                    html.Th("VOLUME %", style={"padding": "10px 8px", "textAlign": "right", "color": "#000", "fontWeight": "700"}),
+                ], style={"background": "linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)"})),
+                html.Tbody(sector_rows)
+            ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.85rem"})
+            
+            # Find sector info for display
+            sector_info = next((s for s in sector_indices if s["sector"] == selected_sector), None)
+            sector_emoji = sector_info["emoji"] if sector_info else "📊"
+            sector_change = sector_info["1d_change"] if sector_info else 0
+            
+            sector_detail_panel = dbc.Card([
+                dbc.CardHeader([
+                    html.Div([
+                        html.Div([
+                            html.Span(sector_emoji, style={"fontSize": "1.5rem", "marginRight": "12px"}),
+                            html.Span(f"{selected_sector}", style={"fontWeight": "700", "fontSize": "1.1rem", "color": "#fff"}),
+                            html.Span(f" ({len(sector_stocks)} stocks)", style={"color": "#888", "fontSize": "0.9rem", "marginLeft": "8px"}),
+                        ], style={"display": "flex", "alignItems": "center"}),
+                        html.Div([
+                            html.Span(f"{'▲' if sector_change >= 0 else '▼'} {sector_change:+.2f}%", style={
+                                "color": "#00ff88" if sector_change >= 0 else "#ff4d4d",
+                                "fontWeight": "700",
+                                "fontSize": "1.1rem",
+                                "marginRight": "15px"
+                            }),
+                            html.Span("(click card to close)", style={
+                                "color": "#666",
+                                "fontSize": "0.75rem",
+                                "fontStyle": "italic"
+                            })
+                        ], style={"display": "flex", "alignItems": "center"})
+                    ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"})
+                ], style={
+                    "background": "linear-gradient(135deg, #2a1a3e 0%, #1a1a2e 100%)",
+                    "borderBottom": "2px solid #9b59b6",
+                    "padding": "15px 20px"
+                }),
+                dbc.CardBody([
+                    html.Div(sector_table, style={"maxHeight": "400px", "overflowY": "auto"})
+                ], style={"padding": "0"})
+            ], style={
+                "background": "linear-gradient(135deg, #15101e 0%, #1a1a2e 50%, #0f0f1a 100%)",
+                "border": "2px solid #9b59b6",
+                "borderRadius": "15px",
+                "marginTop": "15px",
+                "boxShadow": "0 8px 32px rgba(155, 89, 182, 0.25), inset 0 1px 0 rgba(255,255,255,0.05)",
+            })
     
     # Build candlestick chart card
     # Note: dcc.Graph objects don't evaluate to True in boolean context, so check explicitly
@@ -2800,7 +2969,13 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
         }
     )
     
-    return html.Div([indicators_accordion, count_indicator, table])
+    # Build the final layout - include sector detail panel if a sector is selected
+    layout_items = [indicators_accordion]
+    if sector_detail_panel:
+        layout_items.append(sector_detail_panel)
+    layout_items.extend([count_indicator, table])
+    
+    return html.Div(layout_items)
 
 
 # -------------------------------------------------------------------
