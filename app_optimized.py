@@ -1422,13 +1422,20 @@ def create_sector_rotation_panel(sector_indices: list):
             "padding": "14px 20px"
         }),
         dbc.CardBody([
+            # Sector cards row
             html.Div(sector_cards, style={
                 "display": "flex",
                 "gap": "12px",
                 "overflowX": "auto",
                 "padding": "8px 4px",
                 "scrollbarWidth": "thin",
-            })
+            }),
+            # Sector detail placeholder - will be populated by callback
+            html.Div(
+                id="sector-detail-container",
+                className="sector-detail-container",
+                style={"marginTop": "0"}  # Will animate when content is added
+            )
         ], style={"padding": "16px"})
     ], style={
         "background": "linear-gradient(135deg, #12121c 0%, #1a1a2e 50%, #0f0f1a 100%)",
@@ -2192,6 +2199,219 @@ def handle_close_sector_detail(n_clicks):
         return None
     return dash.no_update
 
+# Callback 5c: Update sector detail panel content (separate from main table for smooth animation)
+@app.callback(
+    Output("sector-detail-container", "children"),
+    [Input("selected-sector", "data"),
+     Input("stocks-data-store", "data"),
+     Input("current-days", "data")],
+    prevent_initial_call=True
+)
+def update_sector_detail_panel(selected_sector, stocks_data_store, days):
+    """
+    Update the sector detail panel inside the sector rotation card.
+    This callback only updates the sector detail content, not the entire page.
+    Uses existing data from stocks_data_store - no additional API calls.
+    """
+    if not selected_sector or not stocks_data_store:
+        return None  # Return empty - will collapse smoothly via CSS
+    
+    # Get current industry from stocks_data_store keys
+    current_industry = list(stocks_data_store.keys())[0] if stocks_data_store else None
+    if not current_industry:
+        return None
+    
+    stocks_data = stocks_data_store.get(current_industry, [])
+    if not stocks_data:
+        return None
+    
+    days = days if days and days > 0 else 10
+    
+    # Filter stocks by MACRO_SECTOR - using existing data, no API calls!
+    sector_stocks = [s for s in stocks_data if s.get("MACRO_SECTOR") == selected_sector]
+    logger.info(f"Sector detail update: {selected_sector} has {len(sector_stocks)} stocks")
+    
+    if not sector_stocks:
+        return html.Div(
+            f"No stocks found in {selected_sector}",
+            style={"color": "#888", "padding": "20px", "textAlign": "center"}
+        )
+    
+    # Helper functions for formatting (same as generate_table)
+    def format_value(val, decimals=2):
+        if val is None:
+            return "-"
+        try:
+            v = float(val)
+            return f"{v:,.{decimals}f}"
+        except:
+            return str(val)
+
+    def format_pct(val):
+        if val is None:
+            return "-"
+        try:
+            v = float(val)
+            color = "#00cc66" if v >= 0 else "#ff4d4d"
+            symbol = "▲" if v >= 0 else "▼"
+            return html.Span(f"{symbol} {v:.2f}%", style={"color": color, "fontWeight": "700"})
+        except:
+            return str(val)
+
+    def format_currency(val, decimals=2):
+        if val is None:
+            return "-"
+        try:
+            v = float(val)
+            return f"₹{v:,.{decimals}f}"
+        except:
+            return str(val)
+
+    def format_marketcap(val):
+        if val is None:
+            return "-"
+        try:
+            v = float(val)
+            cr = v / 1e7
+            return f"₹{cr:,.2f}Cr"
+        except:
+            return str(val)
+    
+    # Build full table with ALL indicators (matching main table)
+    sector_rows = []
+    for i, stock in enumerate(sector_stocks):
+        row_bg = "#1a1a1a" if i % 2 == 0 else "#222222"
+        
+        # Determine row styling based on price change
+        price_change_pct = stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT")
+        row_border_color = "transparent"
+        if price_change_pct is not None:
+            if price_change_pct > 2:
+                row_border_color = "#00cc66"  # Strong gainer
+            elif price_change_pct < -2:
+                row_border_color = "#ff4d4d"  # Strong loser
+        
+        sector_rows.append(html.Tr([
+            # S.No
+            html.Td(i + 1, style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "center", "color": "#777", "minWidth": "40px"}),
+            # SYMBOL
+            html.Td(stock["SYMBOL"], style={"backgroundColor": row_bg, "padding": "8px", "fontWeight": "700", "color": "#00D4FF", "borderLeft": f"3px solid {row_border_color}", "minWidth": "80px"}),
+            # INDUSTRIES
+            html.Td(stock.get("INDUSTRIES", "-"), style={"backgroundColor": row_bg, "padding": "8px", "fontSize": "0.8rem", "color": "#aaa", "minWidth": "120px"}),
+            # LAST CLOSE
+            html.Td(format_currency(stock.get("LAST_DAY_CLOSING_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "85px"}),
+            # OPEN
+            html.Td(format_currency(stock.get("TODAY_PRICE_OPEN")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "85px"}),
+            # CURRENT
+            html.Td(format_currency(stock.get("TODAY_CURRENT_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontWeight": "700", "color": "#fff", "minWidth": "85px"}),
+            # 1D CHANGE
+            html.Td(format_currency(stock.get("TODAY_CURRENT_PRICE_CHANGE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "80px"}),
+            # 1D CHANGE %
+            html.Td(format_pct(stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
+            # 10D PRICE (dynamic days)
+            html.Td(format_currency(stock.get("HISTORICAL_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#999", "minWidth": "85px"}),
+            # 10D CHANGE
+            html.Td(format_currency(stock.get("HISTORICAL_CHANGE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#999", "minWidth": "80px"}),
+            # 10D CHANGE %
+            html.Td(format_pct(stock.get("HISTORICAL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
+            # 52W HIGH
+            html.Td(format_currency(stock.get("52WEEK_HIGH")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "85px"}),
+            # 52W LOW
+            html.Td(format_currency(stock.get("52WEEK_LOW")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "85px"}),
+            # MARKET CAP (Cr)
+            html.Td(format_marketcap(stock.get("MARKET_CAP_CR")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "100px"}),
+            # P/E
+            html.Td(format_value(stock.get("PE"), decimals=2), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "60px"}),
+            # EPS
+            html.Td(format_value(stock.get("EPS"), decimals=2), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "70px"}),
+            # AVG VOLUME
+            html.Td(format_value(stock.get("TODAY_VOLUME_AVERAGE"), decimals=0), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#777", "minWidth": "90px"}),
+            # TODAY VOLUME
+            html.Td(format_value(stock.get("TODAY_VOLUME"), decimals=0), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#777", "minWidth": "90px"}),
+            # VOL CHANGE %
+            html.Td(format_pct(stock.get("VOL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
+        ], className="sector-stock-row"))
+    
+    # Build header row with same columns as main table
+    sector_header_style = {"padding": "10px 8px", "textAlign": "center", "color": "#000", "fontWeight": "700", "whiteSpace": "nowrap"}
+    sector_table = html.Table([
+        html.Thead(html.Tr([
+            html.Th("S.No", style={**sector_header_style, "minWidth": "40px"}),
+            html.Th("SYMBOL", style={**sector_header_style, "minWidth": "80px"}),
+            html.Th("INDUSTRIES", style={**sector_header_style, "textAlign": "left", "minWidth": "120px"}),
+            html.Th("LAST CLOSE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th("OPEN", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th("CURRENT", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th("1D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
+            html.Th("1D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+            html.Th(f"{days}D PRICE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th(f"{days}D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
+            html.Th(f"{days}D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+            html.Th("52W HIGH", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th("52W LOW", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
+            html.Th("MARKET CAP (Cr)", style={**sector_header_style, "textAlign": "right", "minWidth": "100px"}),
+            html.Th("P/E", style={**sector_header_style, "textAlign": "right", "minWidth": "60px"}),
+            html.Th("EPS", style={**sector_header_style, "textAlign": "right", "minWidth": "70px"}),
+            html.Th("AVG VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+            html.Th("TODAY VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+            html.Th("VOL CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
+        ], style={"background": "linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)"})),
+        html.Tbody(sector_rows)
+    ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.85rem"})
+    
+    # Get sector emoji from SECTOR_EMOJIS
+    sector_emoji = SECTOR_EMOJIS.get(selected_sector, "📊")
+    
+    # Calculate sector change from stocks
+    total_mcap = sum(s.get("MARKET_CAP_CR", 0) or 0 for s in sector_stocks)
+    weighted_change = sum((s.get("MARKET_CAP_CR", 0) or 0) * (s.get("TODAY_CURRENT_PRICE_CHANGE_PCT", 0) or 0) for s in sector_stocks)
+    sector_change = weighted_change / total_mcap if total_mcap > 0 else 0
+    
+    # Build the panel with animation class
+    return html.Div([
+        # Header with sector info
+        html.Div([
+            html.Div([
+                html.Span(sector_emoji, style={"fontSize": "1.5rem", "marginRight": "12px"}),
+                html.Span(f"{selected_sector}", style={"fontWeight": "700", "fontSize": "1.1rem", "color": "#fff"}),
+                html.Span(f" ({len(sector_stocks)} stocks)", style={"color": "#888", "fontSize": "0.9rem", "marginLeft": "8px"}),
+            ], style={"display": "flex", "alignItems": "center"}),
+            html.Div([
+                html.Span(f"{'▲' if sector_change >= 0 else '▼'} {sector_change:+.2f}%", style={
+                    "color": "#00ff88" if sector_change >= 0 else "#ff4d4d",
+                    "fontWeight": "700",
+                    "fontSize": "1.1rem",
+                    "marginRight": "15px"
+                }),
+                html.Span("(click card to close)", style={
+                    "color": "#666",
+                    "fontSize": "0.75rem",
+                    "fontStyle": "italic"
+                })
+            ], style={"display": "flex", "alignItems": "center"})
+        ], style={
+            "display": "flex", 
+            "justifyContent": "space-between", 
+            "alignItems": "center",
+            "background": "linear-gradient(135deg, #2a1a3e 0%, #1a1a2e 100%)",
+            "borderBottom": "2px solid #9b59b6",
+            "padding": "15px 20px",
+            "borderRadius": "10px 10px 0 0"
+        }),
+        # Table content
+        html.Div(
+            sector_table, 
+            className="sector-detail-table",
+            style={"maxHeight": "350px", "overflowY": "auto", "overflowX": "auto"}
+        )
+    ], className="slide-down-enter", style={
+        "background": "linear-gradient(135deg, #15101e 0%, #1a1a2e 50%, #0f0f1a 100%)",
+        "border": "2px solid #9b59b6",
+        "borderRadius": "12px",
+        "marginTop": "15px",
+        "boxShadow": "0 8px 32px rgba(155, 89, 182, 0.25), inset 0 1px 0 rgba(255,255,255,0.05)",
+    })
+
 # Callback 6: Generate table with sorting
 @app.callback(
     Output("table-container", "children"),
@@ -2200,11 +2420,10 @@ def handle_close_sector_detail(n_clicks):
      Input("current-days", "data"),
      Input("sort-column", "data"),
      Input("sort-direction", "data"),
-     Input("selected-index", "data"),
-     Input("selected-sector", "data")]  # NEW: For sector drill-down
+     Input("selected-index", "data")]  # Removed selected-sector - handled by separate callback now
 )
-def generate_table(stocks_data_store, selected_industry, days, sort_column, sort_direction, selected_index, selected_sector):
-    """Generate table with stock data, candlestick chart, sector drill-down, and sorting."""
+def generate_table(stocks_data_store, selected_industry, days, sort_column, sort_direction, selected_index):
+    """Generate table with stock data, candlestick chart, and sorting."""
 
     if not selected_industry:
         return html.Div([
@@ -2542,138 +2761,8 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
     sector_rotation_panel = create_sector_rotation_panel(sector_indices)
     print(f"DEBUG sector_rotation: {len(sector_indices)} sectors found")
     
-    # ========== SECTOR DETAIL PANEL (when a sector card is clicked) ==========
-    sector_detail_panel = None
-    if selected_sector:
-        # Filter stocks by MACRO_SECTOR - using existing data, no API calls!
-        sector_stocks = [s for s in stocks_data if s.get("MACRO_SECTOR") == selected_sector]
-        logger.info(f"Sector detail: {selected_sector} has {len(sector_stocks)} stocks")
-        
-        if sector_stocks:
-            # Build full table with ALL indicators (matching main table)
-            sector_rows = []
-            for i, stock in enumerate(sector_stocks):
-                row_bg = "#1a1a1a" if i % 2 == 0 else "#222222"
-                
-                # Determine row styling based on price change
-                price_change_pct = stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT")
-                row_border_color = "transparent"
-                if price_change_pct is not None:
-                    if price_change_pct > 2:
-                        row_border_color = "#00cc66"  # Strong gainer
-                    elif price_change_pct < -2:
-                        row_border_color = "#ff4d4d"  # Strong loser
-                
-                sector_rows.append(html.Tr([
-                    # S.No
-                    html.Td(i + 1, style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "center", "color": "#777", "minWidth": "40px"}),
-                    # SYMBOL
-                    html.Td(stock["SYMBOL"], style={"backgroundColor": row_bg, "padding": "8px", "fontWeight": "700", "color": "#00D4FF", "borderLeft": f"3px solid {row_border_color}", "minWidth": "80px"}),
-                    # INDUSTRIES
-                    html.Td(stock.get("INDUSTRIES", "-"), style={"backgroundColor": row_bg, "padding": "8px", "fontSize": "0.8rem", "color": "#aaa", "minWidth": "120px"}),
-                    # LAST CLOSE
-                    html.Td(format_currency(stock.get("LAST_DAY_CLOSING_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "85px"}),
-                    # OPEN
-                    html.Td(format_currency(stock.get("TODAY_PRICE_OPEN")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "85px"}),
-                    # CURRENT
-                    html.Td(format_currency(stock.get("TODAY_CURRENT_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontWeight": "700", "color": "#fff", "minWidth": "85px"}),
-                    # 1D CHANGE
-                    html.Td(format_currency(stock.get("TODAY_CURRENT_PRICE_CHANGE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "80px"}),
-                    # 1D CHANGE %
-                    html.Td(format_pct(stock.get("TODAY_CURRENT_PRICE_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
-                    # 10D PRICE (dynamic days)
-                    html.Td(format_currency(stock.get("HISTORICAL_PRICE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#999", "minWidth": "85px"}),
-                    # 10D CHANGE
-                    html.Td(format_currency(stock.get("HISTORICAL_CHANGE")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#999", "minWidth": "80px"}),
-                    # 10D CHANGE %
-                    html.Td(format_pct(stock.get("HISTORICAL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
-                    # 52W HIGH
-                    html.Td(format_currency(stock.get("52WEEK_HIGH")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "85px"}),
-                    # 52W LOW
-                    html.Td(format_currency(stock.get("52WEEK_LOW")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "85px"}),
-                    # MARKET CAP (Cr)
-                    html.Td(format_marketcap(stock.get("MARKET_CAP_CR")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "100px"}),
-                    # P/E
-                    html.Td(format_value(stock.get("PE"), decimals=2), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "60px"}),
-                    # EPS
-                    html.Td(format_value(stock.get("EPS"), decimals=2), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "color": "#888", "minWidth": "70px"}),
-                    # AVG VOLUME
-                    html.Td(format_value(stock.get("TODAY_VOLUME_AVERAGE"), decimals=0), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#777", "minWidth": "90px"}),
-                    # TODAY VOLUME
-                    html.Td(format_value(stock.get("TODAY_VOLUME"), decimals=0), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "fontSize": "0.8rem", "color": "#777", "minWidth": "90px"}),
-                    # VOL CHANGE %
-                    html.Td(format_pct(stock.get("VOL_CHANGE_PCT")), style={"backgroundColor": row_bg, "padding": "8px", "textAlign": "right", "minWidth": "90px"}),
-                ]))
-            
-            # Build header row with same columns as main table
-            sector_header_style = {"padding": "10px 8px", "textAlign": "center", "color": "#000", "fontWeight": "700", "whiteSpace": "nowrap"}
-            sector_table = html.Table([
-                html.Thead(html.Tr([
-                    html.Th("S.No", style={**sector_header_style, "minWidth": "40px"}),
-                    html.Th("SYMBOL", style={**sector_header_style, "minWidth": "80px"}),
-                    html.Th("INDUSTRIES", style={**sector_header_style, "textAlign": "left", "minWidth": "120px"}),
-                    html.Th("LAST CLOSE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th("OPEN", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th("CURRENT", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th("1D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
-                    html.Th("1D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-                    html.Th(f"{days}D PRICE", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th(f"{days}D CHANGE", style={**sector_header_style, "textAlign": "right", "minWidth": "80px"}),
-                    html.Th(f"{days}D CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-                    html.Th("52W HIGH", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th("52W LOW", style={**sector_header_style, "textAlign": "right", "minWidth": "85px"}),
-                    html.Th("MARKET CAP (Cr)", style={**sector_header_style, "textAlign": "right", "minWidth": "100px"}),
-                    html.Th("P/E", style={**sector_header_style, "textAlign": "right", "minWidth": "60px"}),
-                    html.Th("EPS", style={**sector_header_style, "textAlign": "right", "minWidth": "70px"}),
-                    html.Th("AVG VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-                    html.Th("TODAY VOLUME", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-                    html.Th("VOL CHANGE %", style={**sector_header_style, "textAlign": "right", "minWidth": "90px"}),
-                ], style={"background": "linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)"})),
-                html.Tbody(sector_rows)
-            ], style={"width": "100%", "borderCollapse": "collapse", "fontSize": "0.85rem"})
-            
-            # Find sector info for display
-            sector_info = next((s for s in sector_indices if s["sector"] == selected_sector), None)
-            sector_emoji = sector_info["emoji"] if sector_info else "📊"
-            sector_change = sector_info["1d_change"] if sector_info else 0
-            
-            sector_detail_panel = dbc.Card([
-                dbc.CardHeader([
-                    html.Div([
-                        html.Div([
-                            html.Span(sector_emoji, style={"fontSize": "1.5rem", "marginRight": "12px"}),
-                            html.Span(f"{selected_sector}", style={"fontWeight": "700", "fontSize": "1.1rem", "color": "#fff"}),
-                            html.Span(f" ({len(sector_stocks)} stocks)", style={"color": "#888", "fontSize": "0.9rem", "marginLeft": "8px"}),
-                        ], style={"display": "flex", "alignItems": "center"}),
-                        html.Div([
-                            html.Span(f"{'▲' if sector_change >= 0 else '▼'} {sector_change:+.2f}%", style={
-                                "color": "#00ff88" if sector_change >= 0 else "#ff4d4d",
-                                "fontWeight": "700",
-                                "fontSize": "1.1rem",
-                                "marginRight": "15px"
-                            }),
-                            html.Span("(click card to close)", style={
-                                "color": "#666",
-                                "fontSize": "0.75rem",
-                                "fontStyle": "italic"
-                            })
-                        ], style={"display": "flex", "alignItems": "center"})
-                    ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"})
-                ], style={
-                    "background": "linear-gradient(135deg, #2a1a3e 0%, #1a1a2e 100%)",
-                    "borderBottom": "2px solid #9b59b6",
-                    "padding": "15px 20px"
-                }),
-                dbc.CardBody([
-                    html.Div(sector_table, style={"maxHeight": "400px", "overflowY": "auto", "overflowX": "auto"})
-                ], style={"padding": "0"})
-            ], style={
-                "background": "linear-gradient(135deg, #15101e 0%, #1a1a2e 50%, #0f0f1a 100%)",
-                "border": "2px solid #9b59b6",
-                "borderRadius": "15px",
-                "marginTop": "15px",
-                "boxShadow": "0 8px 32px rgba(155, 89, 182, 0.25), inset 0 1px 0 rgba(255,255,255,0.05)",
-            })
+    # NOTE: Sector detail panel is now handled by separate callback (update_sector_detail_panel)
+    # which updates only the sector-detail-container div for smooth animation
     
     # Build candlestick chart card
     # Note: dcc.Graph objects don't evaluate to True in boolean context, so check explicitly
@@ -3013,11 +3102,8 @@ def generate_table(stocks_data_store, selected_industry, days, sort_column, sort
         }
     )
     
-    # Build the final layout - include sector detail panel if a sector is selected
-    layout_items = [indicators_accordion]
-    if sector_detail_panel:
-        layout_items.append(sector_detail_panel)
-    layout_items.extend([count_indicator, table])
+    # Build the final layout - sector detail panel is now inside the sector rotation card
+    layout_items = [indicators_accordion, count_indicator, table]
     
     return html.Div(layout_items)
 
